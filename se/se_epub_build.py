@@ -21,6 +21,7 @@ import lxml.cssselect
 import lxml.etree as etree
 import regex
 from bs4 import BeautifulSoup
+import tinycss2
 import se
 import se.easy_xml
 import se.epub
@@ -603,7 +604,48 @@ def build(self, metadata_xhtml: str, metadata_tree: se.easy_xml.EasyXmlTree, run
 						css = file.read()
 						processed_css = css
 
-						processed_css = regex.sub(r"(page\-break\-(before|after|inside)\s*:\s*(.+))", "\\1\n\t-webkit-column-break-\\2: \\3 /* For Readium */", processed_css)
+						# Apple Books supports page-break-x but not -webkit-column-break-x
+						# Readium supports -webkit-column-break-x but not page-break-x
+						# So we need a @supports block...
+						parsed_css = tinycss2.parse_stylesheet(css, skip_comments=False)
+						processed_css = processed_css.split("\n")
+						for token_index, token in enumerate(parsed_css):
+							if token.type == "qualified-rule":
+								page_break_rules = []
+								for subtoken_index, subtoken in enumerate(token.content):
+									if subtoken.type == "ident" and "page-break-" in subtoken.lower_value:
+										page_break_value = ''
+										for value in token.content[subtoken_index+1:]:
+											if value.type == 'ident':
+												page_break_value = value.lower_value
+												break
+										page_break_rules.append((subtoken.lower_value, page_break_value))
+
+								# Do we have any page-break-* rules? If so, add a fallback block
+								if page_break_rules:
+									supports_rules = ""
+									for rule in page_break_rules:
+										supports_rules += "\n@supports not (("
+										supports_rules += rule[0]
+										supports_rules += ": "
+										supports_rules += rule[1]
+										supports_rules += ") and ("
+										supports_rules += rule[0].replace("page-", "")
+										supports_rules += ": "
+										supports_rules += rule[1]
+										supports_rules += ")){ "
+										supports_rules += tinycss2.serialize(token.prelude)
+										supports_rules += " { -webkit-column-break-"
+										supports_rules += rule[0].split("-")[-1]
+										supports_rules += ": "
+										supports_rules += rule[1]
+										supports_rules += "; } } "
+
+									if supports_rules:
+										supports_rules += "/* For Readium */"
+										processed_css[token.content[-1].source_line] += supports_rules
+						processed_css = "\n".join(processed_css)
+
 						processed_css = regex.sub(r"^\s*hyphens\s*:\s*(.+)", "\thyphens: \\1\n\tadobe-hyphenate: \\1\n\t-webkit-hyphens: \\1\n\t-epub-hyphens: \\1\n\t-moz-hyphens: \\1", processed_css, flags=regex.MULTILINE)
 						processed_css = regex.sub(r"^\s*hyphens\s*:\s*none;", "\thyphens: none;\n\tadobe-text-layout: optimizeSpeed; /* For Nook */", processed_css, flags=regex.MULTILINE)
 
